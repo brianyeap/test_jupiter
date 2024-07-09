@@ -2,6 +2,8 @@ import { Connection, Keypair, VersionedTransaction } from "@solana/web3.js";
 import fetch from "cross-fetch";
 import { Wallet } from "@project-serum/anchor";
 import bs58 from "bs58";
+import { getSignature } from "./getSignature";
+import { transactionSenderAndConfirmationWaiter } from "./transactionSender";
 
 const connection = new Connection(
   ""
@@ -77,12 +79,12 @@ async function getSwapTransaction(
       userPublicKey: wallet.publicKey.toString(),
       wrapAndUnwrapSol: true,
       computeUnitPriceMicroLamports: computeFee || "auto",
-        //   prioritizationFeeLamports: {"jitoTipLamports": 100000}  if i have this it fails
+      //   prioritizationFeeLamports: {"jitoTipLamports": 100000}
     }),
   });
 
   const { swapTransaction } = await response.json();
-  console.log(swapTransaction)
+  console.log(swapTransaction);
   return swapTransaction;
 }
 
@@ -109,12 +111,44 @@ export async function jupiterV6Swap(
       const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
       const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
       transaction.sign([wallet.payer]);
-      const rawTransaction = transaction.serialize();
-      const txid = await connection.sendRawTransaction(rawTransaction, {
-        skipPreflight: true,
-        maxRetries: 10,
+      const signature = getSignature(transaction);
+
+      const { value: simulatedTransactionResponse } =
+        await connection.simulateTransaction(transaction, {
+          replaceRecentBlockhash: true,
+          commitment: "processed",
+        });
+      const { err, logs } = simulatedTransactionResponse;
+
+      if (err) {
+        console.error("Simulation Error:");
+        console.error({ err, logs });
+        return;
+      }
+
+      const serializedTransaction = Buffer.from(transaction.serialize());
+      const blockhash = transaction.message.recentBlockhash;
+
+      const transactionResponse = await transactionSenderAndConfirmationWaiter({
+        connection,
+        serializedTransaction,
+        blockhashWithExpiryBlockHeight: {
+          blockhash,
+          lastValidBlockHeight: swapObj.lastValidBlockHeight,
+        },
       });
-      return txid;
+
+      // If we are not getting a response back, the transaction has not confirmed.
+      if (!transactionResponse) {
+        console.error("Transaction not confirmed");
+        return;
+      }
+
+      if (transactionResponse.meta?.err) {
+        console.error(transactionResponse.meta?.err);
+      }
+
+      console.log(`https://solscan.io/tx/${signature}`);
     }
   } catch (error) {
     console.error("Error getting swap transaction:", error);
